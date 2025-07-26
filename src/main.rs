@@ -1,7 +1,7 @@
 // main.rs
 
 use iced::widget::{button, column, container, text, svg, row, toggler, progress_bar, Space};
-use iced::{executor, theme, Application, Command, Element, Length, Settings, Theme, Subscription, Alignment, Background, Color, Gradient, Degrees, gradient};
+use iced::{executor, theme, Application, Command, Element, Length, Settings, Theme, Subscription, Alignment, Background, Color, Gradient, Degrees, gradient, Border, Shadow};
 use iced::time;
 use iced::keyboard;
 use std::time::Duration;
@@ -24,12 +24,17 @@ const IV: [u8; 16] = [0xff, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09
 
 type Aes128CbcDec = Decryptor<Aes128>;
 
+// --- Кастомный шрифт ---
+const GEIST_MONO: iced::Font = iced::Font::with_name("Geist Mono");
+
 // --- SVG-данные для логотипа (встроенный) ---
-const LOGO_SVG: &str = r#"<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M12 22C17.5228 22 22 17.5228 22 12C22 6.47715 17.5228 2 12 2C6.47715 2 2 6.47715 2 12C2 17.5228 6.47715 22 12 22Z" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M12 16V12" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M12 8H12.01" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>"#;
+const LOGO_SVG: &str = r#"<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M12 22C17.5228 22 22 17.5228 22 12C22 6.47715 17.5228 2 12 2C6.47715 2 2 6.47715 2 12C2 17.5228 6.47715 22 12 22Z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M12 16V12" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M12 8H12.01" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>"#;
 
 
 pub fn main() -> iced::Result {
-    TrngApp::run(Settings::default())
+    let mut settings = Settings::default();
+    settings.fonts = vec![include_bytes!("../GeistMono-Regular.otf").as_slice().into()];
+    TrngApp::run(settings)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,6 +57,7 @@ struct TrngApp {
 #[derive(Debug, Clone)]
 enum Message {
     ThemeChanged(bool),
+    FontLoaded(Result<(), iced::font::Error>),
     Generate,
     ConnectionTick,
     GenerationTick,
@@ -85,7 +91,7 @@ impl Application for TrngApp {
                 is_connecting: false,
                 is_generating: false,
             },
-            Command::none(),
+            iced::font::load(include_bytes!("../GeistMono-Regular.otf").as_slice()).map(Message::FontLoaded),
         )
     }
 
@@ -93,6 +99,7 @@ impl Application for TrngApp {
 
     fn update(&mut self, message: Message) -> Command<Message> {
         match message {
+            Message::FontLoaded(_) => Command::none(),
             Message::ThemeChanged(is_dark) => {
                 self.theme = if is_dark { AppTheme::Dark } else { AppTheme::Light };
                 Command::none()
@@ -178,45 +185,67 @@ impl Application for TrngApp {
             svg::Handle::from_memory(LOGO_SVG.as_bytes())
         };
         
-        let logo = svg(logo_handle).width(Length::Fixed(48.0)).height(Length::Fixed(48.0));
-        let title = text("Ключник").size(40);
-        let theme_toggle = toggler(Some(String::new()), self.theme == AppTheme::Dark, Message::ThemeChanged).width(Length::Shrink);
+        // --- ИЗМЕНЕНИЕ: Размеры немного уменьшены для баланса ---
+        let logo = svg(logo_handle)
+            .width(Length::Fixed(80.0))
+            .height(Length::Fixed(80.0))
+            .style(theme::Svg::Custom(Box::new(InvertedLogoStyle::new(self.theme))));
 
-        let header = row![logo, Space::new(Length::Fixed(20.0), Length::Shrink), title, Space::new(Length::Fill, Length::Shrink)]
-            .spacing(20)
-            .align_items(Alignment::Center);
+        let logo_container = container(logo)
+            .width(Length::Fixed(140.0))
+            .height(Length::Fixed(140.0))
+            .center_x()
+            .center_y()
+            .style(theme::Container::Custom(Box::new(LogoCircleStyle::new(self.theme))));
+
+        let title = text("Ключник").size(40).font(GEIST_MONO);
+        
+        let theme_toggle = row![
+            text("Light").size(16).font(GEIST_MONO),
+            toggler(None, self.theme == AppTheme::Dark, Message::ThemeChanged).width(Length::Fixed(50.0)),
+            text("Dark").size(16).font(GEIST_MONO)
+        ]
+        .spacing(10)
+        .align_items(Alignment::Center);
 
         let remote_controls = container(column![
-            text("Пульт").size(24),
-            Space::new(Length::Shrink, Length::Fixed(15.0)),
-            button(text("▲").size(24)).on_press(Message::RemoteControl(RemoteCommand::Up)).width(Length::Fill).style(theme::Button::Secondary),
-            button(text("▼").size(24)).on_press(Message::RemoteControl(RemoteCommand::Down)).width(Length::Fill).style(theme::Button::Secondary),
-            button(text("Select").size(24)).on_press(Message::RemoteControl(RemoteCommand::Select)).width(Length::Fill).style(theme::Button::Secondary),
-        ].spacing(15).align_items(Alignment::Center))
-        .padding(25)
+            text("Пульт").size(22).font(GEIST_MONO),
+            Space::new(Length::Shrink, Length::Fixed(10.0)),
+            button(text("▲").size(22)).on_press(Message::RemoteControl(RemoteCommand::Up)).width(Length::Fill).style(theme::Button::Secondary),
+            button(text("▼").size(22)).on_press(Message::RemoteControl(RemoteCommand::Down)).width(Length::Fill).style(theme::Button::Secondary),
+            button(text("Select").size(22)).on_press(Message::RemoteControl(RemoteCommand::Select)).width(Length::Fill).style(theme::Button::Secondary),
+        ].spacing(10).align_items(Alignment::Center))
+        .width(Length::Fixed(140.0))
+        .padding(20)
         .style(theme::Container::Box);
 
-        let top_bar = row![header, Space::new(Length::Fill, Length::Shrink), remote_controls, theme_toggle]
-            .spacing(20)
-            .padding(20)
-            .align_items(Alignment::Center);
+        let top_bar = row![
+            logo_container,
+            Space::new(Length::Fill, Length::Shrink),
+            title,
+            Space::new(Length::Fill, Length::Shrink),
+            remote_controls,
+        ]
+        .spacing(20)
+        .padding(20)
+        .align_items(Alignment::Center);
 
         let main_button_text = if self.is_connecting { "Подключение..." } else if self.is_generating { "Генерация..." } else { "Сгенерировать пароль" };
-        let main_button = button(container(text(main_button_text).size(32)).center_x().center_y())
+        let main_button = button(container(text(main_button_text).size(32).font(GEIST_MONO)).center_x().center_y())
             .padding(25)
             .style(if self.is_connecting || self.is_generating { theme::Button::Secondary } else { theme::Button::Primary })
             .on_press(Message::Generate);
         
         let status_area = if self.is_connecting || self.is_generating {
              column![
-                text(&self.status).size(24),
+                text(&self.status).size(24).font(GEIST_MONO),
                 progress_bar(0.0..=1.0, if self.is_connecting { self.connection_progress } else { self.generation_progress })
             ].spacing(20).align_items(Alignment::Center)
         } else {
-            column![text(&self.status).size(24)].spacing(20).align_items(Alignment::Center)
+            column![text(&self.status).size(24).font(GEIST_MONO)].spacing(20).align_items(Alignment::Center)
         };
         
-        let password_display = container(text(&self.generated_password).size(48))
+        let password_display = container(text(&self.generated_password).size(48).font(GEIST_MONO))
             .style(theme::Container::Box)
             .padding(25);
 
@@ -234,7 +263,7 @@ impl Application for TrngApp {
         );
 
         let content = column![
-            top_bar,
+            row![top_bar, theme_toggle].align_items(Alignment::Center).spacing(20),
             Space::new(Length::Shrink, Length::Fill),
             main_button,
             Space::new(Length::Shrink, Length::Fixed(40.0)),
@@ -294,12 +323,12 @@ impl container::StyleSheet for GradientBackground {
     type Style = Theme;
     fn appearance(&self, _style: &Self::Style) -> container::Appearance {
         let colors = match self.theme {
-            AppTheme::Dark => [Color::from_rgb8(0x11, 0x11, 0x1b), Color::from_rgb8(0x31, 0x32, 0x44)],
-            AppTheme::Light => [Color::from_rgb8(0xdc, 0xdd, 0xe0), Color::from_rgb8(0xef, 0xf1, 0xf5)],
+            AppTheme::Dark => [Color::from_rgb8(0x1e, 0x1e, 0x2e), Color::from_rgb8(0x11, 0x11, 0x1b)],
+            AppTheme::Light => [Color::from_rgb8(0xef, 0xf1, 0xf5), Color::from_rgb8(0xcc, 0xd0, 0xf4)],
         };
         
         let gradient = Gradient::Linear(
-            gradient::Linear::new(Degrees(145.0))
+            gradient::Linear::new(Degrees(160.0))
                 .add_stop(0.0, colors[0])
                 .add_stop(1.0, colors[1]),
         );
@@ -308,6 +337,59 @@ impl container::StyleSheet for GradientBackground {
             background: Some(Background::Gradient(gradient)),
             ..Default::default()
         }
+    }
+}
+
+// --- Кастомный стиль для контейнера логотипа ---
+#[derive(Debug, Clone, Copy)]
+struct LogoCircleStyle {
+    theme: AppTheme,
+}
+impl LogoCircleStyle {
+    fn new(theme: AppTheme) -> Self { Self { theme } }
+}
+impl container::StyleSheet for LogoCircleStyle {
+    type Style = Theme;
+    fn appearance(&self, _style: &Self::Style) -> container::Appearance {
+        let colors = match self.theme {
+            AppTheme::Dark => [Color::from_rgba8(0x31, 0x32, 0x44, 0.8), Color::from_rgba8(0x11, 0x11, 0x1b, 0.5)],
+            AppTheme::Light => [Color::from_rgba8(0xcc, 0xcd, 0xd2, 0.8), Color::from_rgba8(0xef, 0xf1, 0xf5, 0.5)],
+        };
+        
+        container::Appearance {
+            background: Some(Background::Color(colors[0])),
+            border: Border {
+                color: colors[1],
+                width: 2.0,
+                radius: 70.0.into(), // Делаем контейнер круглым
+            },
+            shadow: Shadow {
+                color: Color::from_rgba8(0, 0, 0, 0.25),
+                offset: iced::Vector::new(0.0, 5.0),
+                blur_radius: 10.0,
+            },
+            ..Default::default()
+        }
+    }
+}
+
+// --- Кастомный стиль для SVG-логотипа (эффект инверсии) ---
+#[derive(Debug, Clone, Copy)]
+struct InvertedLogoStyle {
+    theme: AppTheme,
+}
+impl InvertedLogoStyle {
+    fn new(theme: AppTheme) -> Self { Self { theme } }
+}
+impl svg::StyleSheet for InvertedLogoStyle {
+    type Style = Theme;
+    fn appearance(&self, style: &Self::Style) -> svg::Appearance {
+        let palette = style.extended_palette();
+        let color = match self.theme {
+            AppTheme::Dark => Some(palette.primary.strong.color),
+            AppTheme::Light => Some(palette.background.strong.text),
+        };
+        svg::Appearance { color }
     }
 }
 
