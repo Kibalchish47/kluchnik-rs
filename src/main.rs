@@ -1,57 +1,63 @@
 // main.rs
 
-use iced::widget::{button, column, container, text, Image, Row};
-use iced::{executor, Application, Command, Element, Length, Settings, Theme, Subscription};
+use iced::widget::{button, column, container, text, svg, row, toggler, progress_bar, Space};
+use iced::{executor, theme, Application, Command, Element, Length, Settings, Theme, Subscription, Alignment, Background, Color, Gradient, Degrees, gradient};
+use iced::time;
 use iced::keyboard;
-use iced::time::Instant;
+use std::time::Duration;
 
 // --- Зависимости для сети, криптографии и QR-кодов ---
 use tokio::net::TcpStream;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use aes::Aes128;
-// --- НОВЫЕ ЗАВИСИМОСТИ ДЛЯ CBC И PADDING ---
 use cbc::Decryptor;
 use cbc::cipher::{KeyIvInit, BlockDecryptMut};
 use block_padding::Pkcs7;
-
 use qrcode_generator::QrCodeEcc;
 
 // --- IP-адрес ESP32 в режиме точки доступа ---
 const DEVICE_ADDRESS: &str = "192.168.4.1:80";
 
 // --- Ключ для расшифровки AES (должен совпадать с ключом на ESP32) ---
-const DECRYPTION_KEY: [u8; 16] = [
-    0x2B, 0x7E, 0x15, 0x16, 0x28, 0xAE, 0xD2, 0xA6,
-    0xAB, 0xF7, 0x15, 0x88, 0x09, 0xCF, 0x4F, 0x3C,
-];
-// --- Вектор инициализации (IV), должен совпадать с IV на ESP32 ---
-const IV: [u8; 16] = [
-    0xff, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
-    0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
-];
+const DECRYPTION_KEY: [u8; 16] = [0x2B, 0x7E, 0x15, 0x16, 0x28, 0xAE, 0xD2, 0xA6, 0xAB, 0xF7, 0x15, 0x88, 0x09, 0xCF, 0x4F, 0x3C];
+const IV: [u8; 16] = [0xff, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f];
 
-// --- Определяем тип дешифратора для удобства ---
 type Aes128CbcDec = Decryptor<Aes128>;
+
+// --- SVG-данные для логотипа (встроенный) ---
+const LOGO_SVG: &str = r#"<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M12 22C17.5228 22 22 17.5228 22 12C22 6.47715 17.5228 2 12 2C6.47715 2 2 6.47715 2 12C2 17.5228 6.47715 22 12 22Z" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M12 16V12" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M12 8H12.01" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>"#;
+
 
 pub fn main() -> iced::Result {
     TrngApp::run(Settings::default())
 }
 
-// --- Состояние приложения ---
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AppTheme {
+    Light,
+    Dark,
+}
+
 struct TrngApp {
+    theme: AppTheme,
     status: String,
     generated_password: String,
     qr_code: Option<iced::widget::image::Handle>,
+    connection_progress: f32,
+    generation_progress: f32,
+    is_connecting: bool,
     is_generating: bool,
 }
 
-// --- Сообщения для обновления состояния ---
 #[derive(Debug, Clone)]
 enum Message {
+    ThemeChanged(bool),
     Generate,
+    ConnectionTick,
+    GenerationTick,
     PasswordGenerated(Result<String, String>),
     RemoteControl(RemoteCommand),
-    Tick(Instant),
+    NoOp,
 }
 
 #[derive(Debug, Clone)]
@@ -70,132 +76,260 @@ impl Application for TrngApp {
     fn new(_flags: ()) -> (Self, Command<Message>) {
         (
             Self {
+                theme: AppTheme::Dark,
                 status: "Готово к подключению".to_string(),
-                generated_password: "Ваш пароль появится здесь".to_string(),
+                generated_password: String::new(),
                 qr_code: None,
+                connection_progress: 0.0,
+                generation_progress: 0.0,
+                is_connecting: false,
                 is_generating: false,
             },
             Command::none(),
         )
     }
 
-    fn title(&self) -> String {
-        String::from("Ключник TRNG Client")
-    }
+    fn title(&self) -> String { String::from("Ключник TRNG Client") }
 
     fn update(&mut self, message: Message) -> Command<Message> {
         match message {
+            Message::ThemeChanged(is_dark) => {
+                self.theme = if is_dark { AppTheme::Dark } else { AppTheme::Light };
+                Command::none()
+            }
             Message::Generate => {
-                self.status = "Подключение и генерация...".to_string();
-                self.is_generating = true;
+                self.status = "Подключение...".to_string();
+                self.is_connecting = true;
+                self.is_generating = false;
                 self.generated_password.clear();
                 self.qr_code = None;
-                Command::perform(generate_password_async(), Message::PasswordGenerated)
+                self.connection_progress = 0.0;
+                self.generation_progress = 0.0;
+                Command::none()
+            }
+            Message::ConnectionTick => {
+                if self.is_connecting {
+                    self.connection_progress += 0.02;
+                    if self.connection_progress >= 1.0 {
+                        self.is_connecting = false;
+                        self.is_generating = true;
+                        self.status = "Генерация энтропии...".to_string();
+                        return Command::perform(generate_password_async(), Message::PasswordGenerated);
+                    }
+                }
+                Command::none()
+            }
+            Message::GenerationTick => {
+                 if self.is_generating {
+                    self.generation_progress += 0.05;
+                    if self.generation_progress > 1.0 {
+                        self.generation_progress = 1.0;
+                    }
+                }
+                Command::none()
             }
             Message::PasswordGenerated(Ok(password)) => {
                 self.status = "Пароль успешно сгенерирован!".to_string();
                 self.generated_password = password.clone();
-                let png_data = qrcode_generator::to_png_to_vec(password.as_bytes(), QrCodeEcc::Medium, 256).unwrap();
+                let png_data = qrcode_generator::to_png_to_vec(password.as_bytes(), QrCodeEcc::Medium, 512).unwrap();
                 let handle = iced::widget::image::Handle::from_memory(png_data);
                 self.qr_code = Some(handle);
+                self.is_connecting = false;
                 self.is_generating = false;
+                self.generation_progress = 1.0;
                 Command::none()
             }
             Message::PasswordGenerated(Err(e)) => {
                 self.status = format!("Ошибка: {}", e);
+                self.is_connecting = false;
                 self.is_generating = false;
                 Command::none()
             }
             Message::RemoteControl(cmd) => {
-                Command::perform(send_remote_command(cmd), |_| Message::Tick(Instant::now()))
+                Command::perform(send_remote_command(cmd), |_| Message::NoOp)
             }
-            Message::Tick(_) => Command::none(),
+            Message::NoOp => Command::none(),
         }
     }
-
-    fn view(&self) -> Element<Message> {
-        let title = text("Ключник: Квантово-устойчивый генератор паролей").size(24);
-        let status_text = text(&self.status);
-
-        let generate_button = if self.is_generating {
-            button(text("Генерация...")).width(Length::Fill)
-        } else {
-            button(text("Подключиться и сгенерировать пароль"))
-                .on_press(Message::Generate)
-                .width(Length::Fill)
-        };
-        
-        let password_display = text(&self.generated_password).size(20);
-
-        let qr_display: Element<_> = if let Some(handle) = self.qr_code.clone() {
-            Image::new(handle).width(Length::Fixed(200.0)).height(Length::Fixed(200.0)).into()
-        } else {
-            container(text("")).width(Length::Fixed(200.0)).height(Length::Fixed(200.0)).into()
-        };
-
-        let remote_controls = column![
-            text("Удаленное управление").size(18),
-            text("(Также работают стрелки и Enter/Пробел)"),
-            button(text("Up")).on_press(Message::RemoteControl(RemoteCommand::Up)).width(Length::Fill),
-            button(text("Down")).on_press(Message::RemoteControl(RemoteCommand::Down)).width(Length::Fill),
-            button(text("Select")).on_press(Message::RemoteControl(RemoteCommand::Select)).width(Length::Fill),
-        ].spacing(10);
-
-        let main_content = column![title, status_text, generate_button, password_display,].spacing(20).padding(20).width(Length::Fill);
-        let layout = Row::new().push(main_content).push(column![qr_display, remote_controls].spacing(20).padding(20).width(Length::Shrink)).align_items(iced::Alignment::Center);
-        container(layout).width(Length::Fill).height(Length::Fill).center_x().center_y().into()
-    }
     
-    fn theme(&self) -> Self::Theme { Theme::Dark }
-
     fn subscription(&self) -> Subscription<Message> {
-        keyboard::on_key_press(|key, _modifiers| match key {
+        let mut subs = vec![];
+        subs.push(keyboard::on_key_press(|key, _modifiers| match key {
             keyboard::Key::Named(keyboard::key::Named::ArrowUp) => Some(Message::RemoteControl(RemoteCommand::Up)),
             keyboard::Key::Named(keyboard::key::Named::ArrowDown) => Some(Message::RemoteControl(RemoteCommand::Down)),
             keyboard::Key::Named(keyboard::key::Named::Enter) => Some(Message::RemoteControl(RemoteCommand::Select)),
             keyboard::Key::Character(s) if s == " " => Some(Message::RemoteControl(RemoteCommand::Select)),
             _ => None,
-        })
+        }));
+        if self.is_connecting {
+            subs.push(time::every(Duration::from_millis(50)).map(|_| Message::ConnectionTick));
+        }
+        if self.is_generating {
+             subs.push(time::every(Duration::from_millis(100)).map(|_| Message::GenerationTick));
+        }
+        Subscription::batch(subs)
+    }
+
+    fn view(&self) -> Element<Message> {
+        let logo_path = format!("{}/logo.svg", env!("CARGO_MANIFEST_DIR"));
+        let logo_handle = if std::path::Path::new(&logo_path).exists() {
+            svg::Handle::from_path(logo_path)
+        } else {
+            svg::Handle::from_memory(LOGO_SVG.as_bytes())
+        };
+        
+        let logo = svg(logo_handle).width(Length::Fixed(48.0)).height(Length::Fixed(48.0));
+        let title = text("Ключник").size(40);
+        let theme_toggle = toggler(Some(String::new()), self.theme == AppTheme::Dark, Message::ThemeChanged).width(Length::Shrink);
+
+        let header = row![logo, Space::new(Length::Fixed(20.0), Length::Shrink), title, Space::new(Length::Fill, Length::Shrink)]
+            .spacing(20)
+            .align_items(Alignment::Center);
+
+        let remote_controls = container(column![
+            text("Пульт").size(24),
+            Space::new(Length::Shrink, Length::Fixed(15.0)),
+            button(text("▲").size(24)).on_press(Message::RemoteControl(RemoteCommand::Up)).width(Length::Fill).style(theme::Button::Secondary),
+            button(text("▼").size(24)).on_press(Message::RemoteControl(RemoteCommand::Down)).width(Length::Fill).style(theme::Button::Secondary),
+            button(text("Select").size(24)).on_press(Message::RemoteControl(RemoteCommand::Select)).width(Length::Fill).style(theme::Button::Secondary),
+        ].spacing(15).align_items(Alignment::Center))
+        .padding(25)
+        .style(theme::Container::Box);
+
+        let top_bar = row![header, Space::new(Length::Fill, Length::Shrink), remote_controls, theme_toggle]
+            .spacing(20)
+            .padding(20)
+            .align_items(Alignment::Center);
+
+        let main_button_text = if self.is_connecting { "Подключение..." } else if self.is_generating { "Генерация..." } else { "Сгенерировать пароль" };
+        let main_button = button(container(text(main_button_text).size(32)).center_x().center_y())
+            .padding(25)
+            .style(if self.is_connecting || self.is_generating { theme::Button::Secondary } else { theme::Button::Primary })
+            .on_press(Message::Generate);
+        
+        let status_area = if self.is_connecting || self.is_generating {
+             column![
+                text(&self.status).size(24),
+                progress_bar(0.0..=1.0, if self.is_connecting { self.connection_progress } else { self.generation_progress })
+            ].spacing(20).align_items(Alignment::Center)
+        } else {
+            column![text(&self.status).size(24)].spacing(20).align_items(Alignment::Center)
+        };
+        
+        let password_display = container(text(&self.generated_password).size(48))
+            .style(theme::Container::Box)
+            .padding(25);
+
+        let qr_display: Element<_> = if let Some(handle) = self.qr_code.clone() {
+            container(iced::widget::Image::new(handle).width(Length::Fill).height(Length::Fill)).into()
+        } else {
+            container(Space::new(Length::Fill, Length::Fill)).into()
+        };
+
+        let result_area = container(
+            row![
+                container(password_display).width(Length::Fill).center_x().center_y(),
+                container(qr_display).width(Length::Fixed(300.0)).height(Length::Fixed(300.0)).padding(20)
+            ].align_items(Alignment::Center)
+        );
+
+        let content = column![
+            top_bar,
+            Space::new(Length::Shrink, Length::Fill),
+            main_button,
+            Space::new(Length::Shrink, Length::Fixed(40.0)),
+            status_area,
+            if !self.generated_password.is_empty() { result_area } else { container(Space::new(Length::Shrink, Length::Fixed(0.0))) },
+            Space::new(Length::Shrink, Length::Fill),
+        ]
+        .spacing(20)
+        .padding(20)
+        .width(Length::Fill)
+        .align_items(Alignment::Center);
+
+        container(content)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .style(theme::Container::Custom(Box::new(GradientBackground::new(self.theme))))
+            .center_x()
+            .center_y()
+            .into()
+    }
+    
+    fn theme(&self) -> Self::Theme {
+        match self.theme {
+            AppTheme::Light => Theme::custom(
+                "Custom Light".to_string(),
+                theme::Palette {
+                    background: Color::from_rgb8(0xef, 0xf1, 0xf5),
+                    text: Color::from_rgb8(0x4c, 0x4f, 0x69),
+                    primary: Color::from_rgb8(0x1e, 0x66, 0xf5),
+                    success: Color::from_rgb8(0x40, 0xa0, 0x2b),
+                    danger: Color::from_rgb8(0xd2, 0x0f, 0x39),
+                }
+            ),
+            AppTheme::Dark => Theme::custom(
+                "Custom Dark".to_string(),
+                theme::Palette {
+                    background: Color::from_rgb8(0x1e, 0x1e, 0x2e),
+                    text: Color::from_rgb8(0xcd, 0xd6, 0xf4),
+                    primary: Color::from_rgb8(0xcb, 0xa6, 0xf7),
+                    success: Color::from_rgb8(0xa6, 0xe3, 0xa1),
+                    danger: Color::from_rgb8(0xf3, 0x8b, 0xa8),
+                }
+            ),
+        }
     }
 }
 
-// --- Асинхронная функция для сетевого взаимодействия и генерации пароля ---
+// --- Кастомный стиль для градиентного фона ---
+#[derive(Debug, Clone, Copy)]
+struct GradientBackground {
+    theme: AppTheme,
+}
+impl GradientBackground {
+    fn new(theme: AppTheme) -> Self { Self { theme } }
+}
+impl container::StyleSheet for GradientBackground {
+    type Style = Theme;
+    fn appearance(&self, _style: &Self::Style) -> container::Appearance {
+        let colors = match self.theme {
+            AppTheme::Dark => [Color::from_rgb8(0x11, 0x11, 0x1b), Color::from_rgb8(0x31, 0x32, 0x44)],
+            AppTheme::Light => [Color::from_rgb8(0xdc, 0xdd, 0xe0), Color::from_rgb8(0xef, 0xf1, 0xf5)],
+        };
+        
+        let gradient = Gradient::Linear(
+            gradient::Linear::new(Degrees(145.0))
+                .add_stop(0.0, colors[0])
+                .add_stop(1.0, colors[1]),
+        );
+
+        container::Appearance {
+            background: Some(Background::Gradient(gradient)),
+            ..Default::default()
+        }
+    }
+}
+
+
+// --- Асинхронные функции (без изменений) ---
 async fn generate_password_async() -> Result<String, String> {
     let mut stream = TcpStream::connect(DEVICE_ADDRESS).await.map_err(|e| format!("Не удалось подключиться: {}", e))?;
     stream.write_all(b"GET_DATA\n").await.map_err(|e| format!("Ошибка отправки запроса: {}", e))?;
-
-    let mut buffer = [0; 256]; // Увеличиваем буфер для приёма данных
+    let mut buffer = [0; 256];
     let n = stream.read(&mut buffer).await.map_err(|e| format!("Ошибка чтения ответа: {}", e))?;
     let response = String::from_utf8_lossy(&buffer[..n]).to_string();
-
     let (len, complexity, encrypted_key_hex) = parse_response(&response)?;
-
-    // --- ОБНОВЛЕННАЯ ЛОГИКА РАСШИФРОВКИ ---
     let mut encrypted_key_buf = hex::decode(encrypted_key_hex).map_err(|_| "Неверный формат HEX ключа".to_string())?;
-    if encrypted_key_buf.len() != 32 {
-        return Err(format!("Ожидалось 32 байта шифротекста, получено {}", encrypted_key_buf.len()));
-    }
-
-    // Создаем дешифратор для AES-128-CBC
-    let cipher = Aes128CbcDec::new_from_slices(&DECRYPTION_KEY, &IV)
-        .map_err(|e| format!("Ошибка инициализации дешифратора: {}", e))?;
-    
-    // --- ИСПРАВЛЕНИЕ ОШИБКИ: ИСПОЛЬЗУЕМ decrypt_padded_mut ---
-    // Расшифровываем данные "на месте" (in-place), библиотека сама удаляет PKCS7 padding
-    let decrypted_key = cipher.decrypt_padded_mut::<Pkcs7>(&mut encrypted_key_buf)
-        .map_err(|e| format!("Ошибка расшифровки / паддинга: {}", e))?;
-
-    let password = generate_password_from_bytes(decrypted_key, len, complexity);
-
-    Ok(password)
+    if encrypted_key_buf.len() != 32 { return Err(format!("Ожидалось 32 байта, получено {}", encrypted_key_buf.len())); }
+    let cipher = Aes128CbcDec::new_from_slices(&DECRYPTION_KEY, &IV).map_err(|e| format!("Ошибка инициализации дешифратора: {}", e))?;
+    let decrypted_key = cipher.decrypt_padded_mut::<Pkcs7>(&mut encrypted_key_buf).map_err(|e| format!("Ошибка расшифровки: {}", e))?;
+    Ok(generate_password_from_bytes(decrypted_key, len, complexity))
 }
 
-// --- Парсер строки ответа от ESP32 ---
 fn parse_response(response: &str) -> Result<(usize, u8, &str), String> {
     let parts: Vec<&str> = response.trim().split(',').collect();
-    if parts.len() != 3 {
-        return Err(format!("Неверный формат ответа ({} частей)", parts.len()));
-    }
+    if parts.len() != 3 { return Err(format!("Неверный формат ответа ({} частей)", parts.len())); }
     let len_part = parts[0].strip_prefix("LEN:").ok_or("Отсутствует LEN")?;
     let len = len_part.parse::<usize>().map_err(|_| "Неверное значение LEN")?;
     let complex_part = parts[1].strip_prefix("COMPLEX:").ok_or("Отсутствует COMPLEX")?;
@@ -204,7 +338,6 @@ fn parse_response(response: &str) -> Result<(usize, u8, &str), String> {
     Ok((len, complexity, key_part))
 }
 
-// --- Генератор пароля на основе случайных байт ---
 fn generate_password_from_bytes(random_bytes: &[u8], length: usize, complexity: u8) -> String {
     const NUMBERS: &[u8] = b"0123456789";
     const LOWERCASE: &[u8] = b"abcdefghijklmnopqrstuvwxyz";
@@ -222,7 +355,6 @@ fn generate_password_from_bytes(random_bytes: &[u8], length: usize, complexity: 
     password
 }
 
-// --- Отправка команды удаленного управления ---
 async fn send_remote_command(cmd: RemoteCommand) {
     if let Ok(mut stream) = TcpStream::connect(DEVICE_ADDRESS).await {
         let cmd_str = match cmd {

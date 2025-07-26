@@ -1,17 +1,14 @@
 [package]
 name = "trng_client"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
 
 [dependencies]
-iced = { version = "0.12", features = ["tokio", "image"] }
+iced = { version = "0.12", features = ["tokio", "svg", "image"] }
 tokio = { version = "1", features = ["full"] }
 hex = "0.4.3"
 qrcode-generator = "4.1.9"
-
-# --- НОВЫЕ ЗАВИСИМОСТИ ДЛЯ AES-CBC ---
 aes = "0.8.4"
 cbc = { version = "0.1.2", features = ["alloc"] }
 block-padding = "0.3.3"
-
 
